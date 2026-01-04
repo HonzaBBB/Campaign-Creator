@@ -6,7 +6,9 @@
  * 
  * Spouští se z MCC účtu.
  * 
- * @version 1.0.0
+ * Sheet šablona: https://docs.google.com/spreadsheets/d/14h9Q91XkAT_0e5jSSxy28BB0XM18QhoI_SAwuS64y1I/edit
+ * 
+ * @version 1.1.0
  * @author Honza Brzák PPC Freelancer
  */
 
@@ -15,14 +17,15 @@
 // ============================================================================
 
 const CONFIG = {
-  // Google Sheet URL s daty
-  SPREADSHEET_URL: 'https://YOUR_GOOGLE_SHEET_URL',
+  // Google Sheet URL s daty (vytvoř si kopii šablony)
+  // Šablona: https://docs.google.com/spreadsheets/d/14h9Q91XkAT_0e5jSSxy28BB0XM18QhoI_SAwuS64y1I/copy
+  SPREADSHEET_URL: 'https://docs.google.com/spreadsheets/TVUJ_SHEET',
   
   // Název listu s daty (ponech prázdné pro první list)
   SHEET_NAME: '',
   
   // Customer ID klientského účtu (bez pomlček)
-  CUSTOMER_ID: '1234567890',
+  CUSTOMER_ID: '0123456789',
   
   // Název kampaně (celý název, jak se zobrazí v Google Ads)
   CAMPAIGN_NAME: 'SEA_Nazev_Kampane',
@@ -31,7 +34,7 @@ const CONFIG = {
   AD_GROUP_NAME: 'NazevSestavy',
   
   // Final URL pro reklamy
-  FINAL_URL: 'https://example.com',
+  FINAL_URL: 'https://example.cz/',
   
   // Denní budget v CZK
   DAILY_BUDGET_CZK: 200,
@@ -67,7 +70,7 @@ const CONFIG = {
 // ============================================================================
 
 function main() {
-  Logger.log('=== Search Campaign Creator ===');
+  Logger.log('=== Search Campaign Creator v1.1 ===');
   Logger.log(`Cílový účet: ${CONFIG.CUSTOMER_ID}`);
   
   try {
@@ -207,32 +210,28 @@ function validateData(data) {
 }
 
 // ============================================================================
-// VYTVOŘENÍ KAMPANĚ
+// VYTVOŘENÍ KAMPANĚ - DVOUFÁZOVÝ PŘÍSTUP
 // ============================================================================
 
 function createCampaign(sheetData) {
   const customerId = AdsApp.currentAccount().getCustomerId().replace(/-/g, '');
-  const operations = [];
-  
-  // Temporary IDs pro propojení entit
-  let tempId = -1;
-  const budgetTempId = tempId--;
-  const campaignTempId = tempId--;
-  const adGroupTempId = tempId--;
-  
-  const budgetResourceName = `customers/${customerId}/campaignBudgets/${budgetTempId}`;
-  const campaignResourceName = `customers/${customerId}/campaigns/${campaignTempId}`;
-  const adGroupResourceName = `customers/${customerId}/adGroups/${adGroupTempId}`;
+  Logger.log(`Vytvářím kampaň v účtu: ${customerId}`);
   
   const campaignName = CONFIG.CAMPAIGN_NAME;
   const adGroupName = CONFIG.AD_GROUP_NAME;
   
-  // 1. Budget
-  operations.push({
+  // ========================================
+  // FÁZE 1: Budget + Campaign (samostatně)
+  // ========================================
+  
+  Logger.log('');
+  Logger.log('--- Fáze 1: Budget + Campaign ---');
+  
+  // Budget
+  Logger.log('Vytvářím budget...');
+  const budgetResult = AdsApp.mutate({
     campaignBudgetOperation: {
       create: {
-        resourceName: budgetResourceName,
-        name: `Budget - ${campaignName}`,
         amountMicros: String(CONFIG.DAILY_BUDGET_CZK * 1000000),
         deliveryMethod: 'STANDARD',
         explicitlyShared: false
@@ -240,34 +239,73 @@ function createCampaign(sheetData) {
     }
   });
   
-  // 2. Campaign
-  operations.push({
+  if (!budgetResult.isSuccessful()) {
+    Logger.log('❌ Budget creation failed');
+    Logger.log('Budget result JSON: ' + JSON.stringify(budgetResult));
+    throw new Error('Budget creation failed - see log above for details');
+  }
+  const budgetResourceName = budgetResult.getResourceName();
+  Logger.log(`✅ Budget: ${budgetResourceName}`);
+  
+  // Campaign
+  Logger.log('Vytvářím campaign...');
+  const campaignResult = AdsApp.mutate({
     campaignOperation: {
       create: {
-        resourceName: campaignResourceName,
         name: campaignName,
-        status: 'PAUSED', // Vytvoří se jako pauznutá
+        status: 'PAUSED',
         advertisingChannelType: 'SEARCH',
         campaignBudget: budgetResourceName,
-        // Maximize Clicks bidding
-        maximizeClicks: {},
-        // Network settings
+        targetSpend: {},
         networkSettings: {
           targetGoogleSearch: true,
           targetSearchNetwork: false,
           targetContentNetwork: false,
           targetPartnerSearchNetwork: false
         },
-        // Geo targeting options
-        geoTargetTypeSetting: {
-          positiveGeoTargetType: 'PRESENCE',
-          negativeGeoTargetType: 'PRESENCE_OR_INTEREST'
-        }
+        containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING'
       }
     }
   });
   
-  // 3. Location targeting (Czech Republic)
+  if (!campaignResult.isSuccessful()) {
+    Logger.log('❌ Campaign creation failed');
+    Logger.log('Campaign result JSON: ' + JSON.stringify(campaignResult));
+    throw new Error('Campaign creation failed - see log above for details');
+  }
+  Logger.log(`✅ Campaign created: ${campaignName}`);
+  
+  // Získej reálné campaign resource name přes selector
+  // (mutate vrací temporary ID, potřebujeme skutečné)
+  const campaignIterator = AdsApp.campaigns()
+    .withCondition(`campaign.name = "${campaignName}"`)
+    .get();
+  
+  if (!campaignIterator.hasNext()) {
+    throw new Error(`Campaign "${campaignName}" not found after creation`);
+  }
+  
+  const campaign = campaignIterator.next();
+  const campaignId = campaign.getId();
+  const campaignResourceName = `customers/${customerId}/campaigns/${campaignId}`;
+  Logger.log(`✅ Campaign ID: ${campaignId}`);
+  
+  // ========================================
+  // FÁZE 2: Targeting, Ad Group, Keywords, RSA, Callouts
+  // ========================================
+  
+  Logger.log('');
+  Logger.log('--- Fáze 2: Targeting, Ad Group, Keywords, RSA, Callouts ---');
+  
+  const operations = [];
+  const operationNames = [];
+  
+  // Temporary ID jen pro ad group
+  let tempId = -1;
+  const adGroupTempId = tempId--;
+  const adGroupResourceName = `customers/${customerId}/adGroups/${adGroupTempId}`;
+  
+  // Location targeting
   operations.push({
     campaignCriterionOperation: {
       create: {
@@ -279,8 +317,9 @@ function createCampaign(sheetData) {
       }
     }
   });
+  operationNames.push('Location targeting');
   
-  // 4. Language targeting (Čeština)
+  // Language targeting
   operations.push({
     campaignCriterionOperation: {
       create: {
@@ -291,8 +330,9 @@ function createCampaign(sheetData) {
       }
     }
   });
+  operationNames.push('Language targeting');
   
-  // 5. Ad Group
+  // Ad Group
   operations.push({
     adGroupOperation: {
       create: {
@@ -304,8 +344,9 @@ function createCampaign(sheetData) {
       }
     }
   });
+  operationNames.push('Ad Group');
   
-  // 6. Keywords (Phrase Match)
+  // Keywords (Phrase Match)
   sheetData.keywords.forEach(keyword => {
     operations.push({
       adGroupCriterionOperation: {
@@ -319,9 +360,10 @@ function createCampaign(sheetData) {
         }
       }
     });
+    operationNames.push(`Keyword: ${keyword}`);
   });
   
-  // 7. RSA Ad
+  // RSA Ad
   const headlines = sheetData.headlines.map(text => ({ text: text }));
   const descriptions = sheetData.descriptions.map(text => ({ text: text }));
   
@@ -340,8 +382,9 @@ function createCampaign(sheetData) {
       }
     }
   });
+  operationNames.push('RSA Ad');
   
-  // 8. Callout Assets + linking k kampani
+  // Callout Assets
   const calloutAssetTempIds = [];
   
   sheetData.callouts.forEach((calloutText, index) => {
@@ -349,7 +392,6 @@ function createCampaign(sheetData) {
     const assetResourceName = `customers/${customerId}/assets/${assetTempId}`;
     calloutAssetTempIds.push(assetResourceName);
     
-    // Vytvoř asset
     operations.push({
       assetOperation: {
         create: {
@@ -360,10 +402,11 @@ function createCampaign(sheetData) {
         }
       }
     });
+    operationNames.push(`Callout Asset: ${calloutText}`);
   });
   
-  // Link callout assets ke kampani
-  calloutAssetTempIds.forEach(assetResourceName => {
+  // Link Callout Assets ke kampani
+  calloutAssetTempIds.forEach((assetResourceName, index) => {
     operations.push({
       campaignAssetOperation: {
         create: {
@@ -373,30 +416,55 @@ function createCampaign(sheetData) {
         }
       }
     });
+    operationNames.push(`Callout Link: ${sheetData.callouts[index]}`);
   });
   
-  // Spusť všechny operace najednou
+  // Spusť fázi 2
   Logger.log(`Spouštím ${operations.length} operací...`);
-  
-  const results = AdsApp.mutateAll(operations, { partialFailure: false });
+  const results = AdsApp.mutateAll(operations, { partialFailure: true });
   
   // Kontrola výsledků
   let successCount = 0;
   let errorCount = 0;
+  let warningCount = 0;
   
   results.forEach((result, index) => {
+    const opName = operationNames[index] || `Operation ${index}`;
     if (result.isSuccessful()) {
       successCount++;
+      Logger.log(`✅ ${opName}: OK`);
     } else {
-      errorCount++;
-      Logger.log(`Operace ${index} selhala: ${result.getErrorMessage()}`);
+      let errorMsg = 'Unknown error';
+      let isPolicyViolation = false;
+      try {
+        const json = JSON.stringify(result);
+        const parsed = JSON.parse(json);
+        if (parsed.sc && parsed.sc.Ia && parsed.sc.Ia.errors) {
+          errorMsg = parsed.sc.Ia.errors.map(e => e.message).join('; ');
+          isPolicyViolation = errorMsg.includes('policy');
+        }
+      } catch(e) {}
+      
+      // Policy violations na keywords jsou jen warning
+      if (opName.startsWith('Keyword:') && isPolicyViolation) {
+        warningCount++;
+        Logger.log(`⚠️ ${opName}: ${errorMsg} (keyword přeskočeno)`);
+      } else {
+        errorCount++;
+        Logger.log(`❌ ${opName}: ${errorMsg}`);
+      }
     }
   });
   
-  Logger.log(`Úspěšných operací: ${successCount}/${operations.length}`);
+  Logger.log('');
+  Logger.log(`Fáze 2: Úspěšných: ${successCount}, Chyb: ${errorCount}, Varování: ${warningCount}`);
   
   if (errorCount > 0) {
     throw new Error(`${errorCount} operací selhalo. Zkontroluj log.`);
+  }
+  
+  if (warningCount > 0) {
+    Logger.log(`⚠️ ${warningCount} keywords přeskočeno kvůli policy violations`);
   }
   
   return {
